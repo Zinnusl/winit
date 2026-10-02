@@ -43,6 +43,7 @@ mod event_processor;
 pub mod ffi;
 mod ime;
 mod monitor;
+mod steam_overlay_compat;
 mod util;
 mod window;
 mod xdisplay;

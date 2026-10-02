@@ -304,27 +304,16 @@ impl UnownedWindow {
         // Figure out the window's parent.
         let parent = window_attrs.platform_specific.x11.embed_window.unwrap_or(root);
 
-        // finally creating the window
-        let xwindow = {
-            let (x, y) = position.map_or((0, 0), Into::into);
-            let wid = leap!(xconn.xcb_connection().generate_id());
-            let result = xconn.xcb_connection().create_window(
-                depth,
-                wid,
-                parent,
-                x,
-                y,
-                dimensions.0.try_into().unwrap(),
-                dimensions.1.try_into().unwrap(),
-                0,
-                xproto::WindowClass::INPUT_OUTPUT,
-                visual,
-                &window_attributes,
-            );
-            leap!(leap!(result).check());
-
-            wid
-        };
+        // Steam registers the window at the public Xlib creation boundary.
+        let xwindow = leap!(super::steam_overlay_compat::create_window(
+            &xconn,
+            parent,
+            position.map_or((0, 0), Into::into),
+            dimensions,
+            depth,
+            visual,
+            &window_attributes,
+        ));
 
         // The COPY_FROM_PARENT is a special value for the visual used to copy
         // the visual from the parent window, thus we have to query the visual
@@ -489,11 +478,9 @@ impl UnownedWindow {
             );
             leap!(result).ignore_error();
 
-            // Select XInput2 events
-            let mask = xinput::XIEventMask::MOTION
-                | xinput::XIEventMask::BUTTON_PRESS
-                | xinput::XIEventMask::BUTTON_RELEASE
-                | xinput::XIEventMask::ENTER
+            // Core events carry pointer motion/buttons through Steam's Xlib
+            // hooks. Keep XI2 focus, enter/leave, touch and raw devices intact.
+            let mask = xinput::XIEventMask::ENTER
                 | xinput::XIEventMask::LEAVE
                 | xinput::XIEventMask::FOCUS_IN
                 | xinput::XIEventMask::FOCUS_OUT

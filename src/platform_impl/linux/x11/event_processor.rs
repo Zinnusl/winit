@@ -204,6 +204,40 @@ impl EventProcessor {
 
                 self.xinput_key_input(xev.as_mut(), state, &mut callback);
             },
+            xlib::MotionNotify => {
+                let event: &xlib::XMotionEvent = xev.as_ref();
+                let window = event.window as xproto::Window;
+                Self::window_target(&self.target).xconn.set_timestamp(event.time as _);
+                // Match XI2: modifiers belong to keyboard focus, not hover.
+                if let Some(active) = self.active_window {
+                    self.update_mods_from_core_event(mkwid(active), event.state as _, &mut callback);
+                }
+                // Core X11 carries no physical device id; zero denotes this
+                // combined core pointer, never an invented XI2 device.
+                self.pointer_motion(
+                    window,
+                    mkdid(0),
+                    (f64::from(event.x), f64::from(event.y)),
+                    &mut callback,
+                );
+            },
+            xlib::ButtonPress | xlib::ButtonRelease => {
+                let event: &xlib::XButtonEvent = xev.as_ref();
+                let window_id = mkwid(event.window as xproto::Window);
+                Self::window_target(&self.target).xconn.set_timestamp(event.time as _);
+                if let Some(active) = self.active_window {
+                    self.update_mods_from_core_event(mkwid(active), event.state as _, &mut callback);
+                }
+                let state = if event_type == xlib::ButtonPress {
+                    ElementState::Pressed
+                } else {
+                    ElementState::Released
+                };
+                // A wheel detent belongs to the press, not both button edges.
+                if state == ElementState::Pressed || !(4..=7).contains(&event.button) {
+                    self.pointer_button_input(window_id, mkdid(0), event.button, state, &mut callback);
+                }
+            },
             xlib::GenericEvent => {
                 let wt = Self::window_target(&self.target);
                 let xev: GenericEventCookie =
@@ -1048,7 +1082,7 @@ impl EventProcessor {
         &self,
         event: &XIDeviceEvent,
         state: ElementState,
-        mut callback: F,
+        callback: F,
     ) where
         F: FnMut(&RootAEL, Event<T>),
     {
@@ -1064,7 +1098,20 @@ impl EventProcessor {
             return;
         }
 
-        let event = match event.detail as u32 {
+        self.pointer_button_input(window_id, device_id, event.detail as u32, state, callback);
+    }
+
+    fn pointer_button_input<T: 'static, F>(
+        &self,
+        window_id: crate::window::WindowId,
+        device_id: crate::event::DeviceId,
+        detail: u32,
+        state: ElementState,
+        mut callback: F,
+    ) where
+        F: FnMut(&RootAEL, Event<T>),
+    {
+        let event = match detail {
             xlib::Button1 => {
                 WindowEvent::MouseInput { device_id, state, button: MouseButton::Left }
             },
@@ -1082,7 +1129,7 @@ impl EventProcessor {
             // special-case these button presses.
             4..=7 => WindowEvent::MouseWheel {
                 device_id,
-                delta: match event.detail {
+                delta: match detail {
                     4 => MouseScrollDelta::LineDelta(0.0, 1.0),
                     5 => MouseScrollDelta::LineDelta(0.0, -1.0),
                     6 => MouseScrollDelta::LineDelta(1.0, 0.0),
@@ -1115,20 +1162,7 @@ impl EventProcessor {
         let window_id = mkwid(window);
         let new_cursor_pos = (event.event_x, event.event_y);
 
-        let cursor_moved = self.with_window(window, |window| {
-            let mut shared_state_lock = window.shared_state_lock();
-            util::maybe_change(&mut shared_state_lock.cursor_pos, new_cursor_pos)
-        });
-
-        if cursor_moved == Some(true) {
-            let position = PhysicalPosition::new(event.event_x, event.event_y);
-
-            let event = Event::WindowEvent {
-                window_id,
-                event: WindowEvent::CursorMoved { device_id, position },
-            };
-            callback(&self.target, event);
-        } else if cursor_moved.is_none() {
+        if !self.pointer_motion(window, device_id, new_cursor_pos, &mut callback) {
             return;
         }
 
@@ -1177,6 +1211,36 @@ impl EventProcessor {
         for event in events {
             callback(&self.target, event);
         }
+    }
+
+    /// Publish a changed position only for a live window. Both input paths use
+    /// the same cursor state so enter/leave, warps and motion remain coherent.
+    fn pointer_motion<T: 'static, F>(
+        &self,
+        window: xproto::Window,
+        device_id: crate::event::DeviceId,
+        position: (f64, f64),
+        mut callback: F,
+    ) -> bool
+    where
+        F: FnMut(&RootAEL, Event<T>),
+    {
+        let changed = self.with_window(window, |window| {
+            util::maybe_change(&mut window.shared_state_lock().cursor_pos, position)
+        });
+        if changed == Some(true) {
+            callback(
+                &self.target,
+                Event::WindowEvent {
+                    window_id: mkwid(window),
+                    event: WindowEvent::CursorMoved {
+                        device_id,
+                        position: PhysicalPosition::new(position.0, position.1),
+                    },
+                },
+            );
+        }
+        changed.is_some()
     }
 
     fn xinput2_mouse_enter<T: 'static, F>(&self, event: &XIEnterEvent, mut callback: F)
