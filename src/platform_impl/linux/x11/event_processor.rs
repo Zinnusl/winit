@@ -204,23 +204,6 @@ impl EventProcessor {
 
                 self.xinput_key_input(xev.as_mut(), state, &mut callback);
             },
-            xlib::MotionNotify => {
-                let event: &xlib::XMotionEvent = xev.as_ref();
-                let window = event.window as xproto::Window;
-                Self::window_target(&self.target).xconn.set_timestamp(event.time as _);
-                // Match XI2: modifiers belong to keyboard focus, not hover.
-                if let Some(active) = self.active_window {
-                    self.update_mods_from_core_event(mkwid(active), event.state as _, &mut callback);
-                }
-                // Core X11 carries no physical device id; zero denotes this
-                // combined core pointer, never an invented XI2 device.
-                self.pointer_motion(
-                    window,
-                    mkdid(0),
-                    (f64::from(event.x), f64::from(event.y)),
-                    &mut callback,
-                );
-            },
             xlib::ButtonPress | xlib::ButtonRelease => {
                 let event: &xlib::XButtonEvent = xev.as_ref();
                 let window_id = mkwid(event.window as xproto::Window);
@@ -258,6 +241,13 @@ impl EventProcessor {
                         };
 
                         let xev: &XIDeviceEvent = unsafe { xev.as_event() };
+                        // XI2 selection suppresses the server's core events
+                        // for this client. Requeue the equivalent Xlib event
+                        // so Steam can consume it before ordinary game clicks.
+                        super::steam_overlay_compat::expose_pointer_event(
+                            &Self::window_target(&self.target).xconn,
+                            xev,
+                        );
                         // Core owns ordinary clicks. XI2's emulation flag
                         // prevents a native smooth scroll being counted again
                         // as a wheel button; release never adds a detent.
@@ -280,6 +270,10 @@ impl EventProcessor {
                             &mut callback,
                         );
                         self.xinput2_mouse_motion(xev, &mut callback);
+                        super::steam_overlay_compat::expose_pointer_event(
+                            &Self::window_target(&self.target).xconn,
+                            xev,
+                        );
                     },
                     xinput2::XI_Enter => {
                         let xev: &XIEnterEvent = unsafe { xev.as_event() };

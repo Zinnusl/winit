@@ -78,3 +78,70 @@ pub(super) fn create_window(
     }
     Ok(window as xproto::Window)
 }
+
+/// XI2 selection suppresses native core pointer delivery to this client.
+/// Requeue an equivalent core event through the same Xlib queue Steam reads.
+/// The original XI2 motion retains precise positions and scroll valuators;
+/// queued motion is overlay-only, while queued ordinary clicks reach winit
+/// only if Steam leaves them in the queue.
+pub(super) fn expose_pointer_event(xconn: &XConnection, input: &ffi::XIDeviceEvent) {
+    let button = input.evtype == ffi::XI_ButtonPress || input.evtype == ffi::XI_ButtonRelease;
+    if button
+        && !(4..=7).contains(&input.detail)
+        && input.flags & ffi::XIPointerEmulated != 0
+    {
+        // Preserve upstream's touch-versus-emulated-mouse distinction.
+        return;
+    }
+    let state = (input.mods.effective as u32 & 0xff)
+        | ((input.group.effective as u32 & 3) << 13)
+        | (1..=5).fold(0, |state, button| {
+            let byte = button / 8;
+            let pressed = byte < input.buttons.mask_len
+                // SAFETY: the live XI2 cookie owns mask_len bytes.
+                && unsafe { *input.buttons.mask.add(byte as usize) } & (1 << (button % 8)) != 0;
+            state | if pressed { 1 << (7 + button) } else { 0 }
+        });
+    // SAFETY: XEvent is POD. Its selected pointer member is fully initialized
+    // before XPutBackEvent copies it into this display's owned event queue.
+    let mut event: ffi::XEvent = unsafe { std::mem::zeroed() };
+    if button {
+        event.button = ffi::XButtonEvent {
+            type_: if input.evtype == ffi::XI_ButtonPress { ffi::ButtonPress } else { ffi::ButtonRelease },
+            serial: input.serial,
+            send_event: input.send_event,
+            display: xconn.display,
+            window: input.event,
+            root: input.root,
+            subwindow: input.child,
+            time: input.time,
+            x: input.event_x as _,
+            y: input.event_y as _,
+            x_root: input.root_x as _,
+            y_root: input.root_y as _,
+            state,
+            button: input.detail as _,
+            same_screen: 1,
+        };
+    } else {
+        event.motion = ffi::XMotionEvent {
+            type_: ffi::MotionNotify,
+            serial: input.serial,
+            send_event: input.send_event,
+            display: xconn.display,
+            window: input.event,
+            root: input.root,
+            subwindow: input.child,
+            time: input.time,
+            x: input.event_x as _,
+            y: input.event_y as _,
+            x_root: input.root_x as _,
+            y_root: input.root_y as _,
+            state,
+            is_hint: 0,
+            same_screen: 1,
+        };
+    }
+    // SAFETY: this connection and event are live and owned by the event thread.
+    unsafe { (xconn.xlib.XPutBackEvent)(xconn.display, &mut event) };
+}
