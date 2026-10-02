@@ -5,7 +5,10 @@
 
 use std::ptr;
 
-use x11rb::{connection::Connection as _, protocol::xproto};
+use x11rb::{
+    connection::Connection as _,
+    protocol::{xinput, xproto},
+};
 
 use super::{ffi, util::memory::XSmartPointer, X11Error, XConnection};
 
@@ -79,19 +82,32 @@ pub(super) fn create_window(
     Ok(window as xproto::Window)
 }
 
+/// Origin metadata for only the next event returned from the Xlib queue.
+/// No cookie pointer survives publication. A consumed event's metadata expires
+/// on an empty queue or the next native dispatch, so it cannot label later input.
+#[derive(Clone, Copy)]
+pub(super) struct ButtonOrigin {
+    pub(super) window: ffi::Window,
+    pub(super) time: ffi::Time,
+    pub(super) serial: std::os::raw::c_ulong,
+    pub(super) button: u32,
+    pub(super) event_type: i32,
+    pub(super) device_id: xinput::DeviceId,
+}
+
 /// XI2 selection suppresses native core pointer delivery to this client.
 /// Requeue an equivalent core event through the same Xlib queue Steam reads.
 /// The original XI2 motion retains precise positions and scroll valuators;
 /// queued motion is overlay-only, while queued ordinary clicks reach winit
 /// only if Steam leaves them in the queue.
-pub(super) fn expose_pointer_event(xconn: &XConnection, input: &ffi::XIDeviceEvent) {
+pub(super) fn expose_pointer_event(
+    xconn: &XConnection,
+    input: &ffi::XIDeviceEvent,
+) -> Option<ButtonOrigin> {
     let button = input.evtype == ffi::XI_ButtonPress || input.evtype == ffi::XI_ButtonRelease;
-    if button
-        && !(4..=7).contains(&input.detail)
-        && input.flags & ffi::XIPointerEmulated != 0
-    {
+    if button && !(4..=7).contains(&input.detail) && input.flags & ffi::XIPointerEmulated != 0 {
         // Preserve upstream's touch-versus-emulated-mouse distinction.
-        return;
+        return None;
     }
     let state = (input.mods.effective as u32 & 0xff)
         | ((input.group.effective as u32 & 3) << 13)
@@ -107,7 +123,11 @@ pub(super) fn expose_pointer_event(xconn: &XConnection, input: &ffi::XIDeviceEve
     let mut event: ffi::XEvent = unsafe { std::mem::zeroed() };
     if button {
         event.button = ffi::XButtonEvent {
-            type_: if input.evtype == ffi::XI_ButtonPress { ffi::ButtonPress } else { ffi::ButtonRelease },
+            type_: if input.evtype == ffi::XI_ButtonPress {
+                ffi::ButtonPress
+            } else {
+                ffi::ButtonRelease
+            },
             serial: input.serial,
             send_event: input.send_event,
             display: xconn.display,
@@ -144,4 +164,16 @@ pub(super) fn expose_pointer_event(xconn: &XConnection, input: &ffi::XIDeviceEve
     }
     // SAFETY: this connection and event are live and owned by the event thread.
     unsafe { (xconn.xlib.XPutBackEvent)(xconn.display, &mut event) };
+    button.then(|| ButtonOrigin {
+        window: input.event,
+        time: input.time,
+        serial: input.serial,
+        button: input.detail as _,
+        event_type: if input.evtype == ffi::XI_ButtonPress {
+            ffi::ButtonPress
+        } else {
+            ffi::ButtonRelease
+        },
+        device_id: input.deviceid as _,
+    })
 }

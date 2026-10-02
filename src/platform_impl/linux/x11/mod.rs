@@ -330,6 +330,7 @@ impl<T: 'static> EventLoop<T> {
             active_window: None,
             modifiers: Default::default(),
             is_composing: false,
+            queued_button_origin: None,
         };
 
         // Register for device hotplug events

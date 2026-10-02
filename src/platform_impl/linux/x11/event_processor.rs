@@ -72,6 +72,7 @@ pub struct EventProcessor {
     pub xfiltered_modifiers: VecDeque<u8>,
     pub xmodmap: util::ModifierKeymap,
     pub is_composing: bool,
+    pub(super) queued_button_origin: Option<super::steam_overlay_compat::ButtonOrigin>,
 }
 
 impl EventProcessor {
@@ -148,6 +149,10 @@ impl EventProcessor {
         F: FnMut(&RootAEL, Event<T>),
     {
         let event_type = xev.get_type();
+        // XPutBackEvent puts the translated button at the head of the queue.
+        // Only this next dispatch can adopt its native origin; any other event
+        // consumes the metadata instead of allowing it to go stale.
+        let button_origin = self.queued_button_origin.take();
 
         // If we have IME disabled, don't try to `filter_event`, since only IME can consume them
         // and forward back. This is not desired for e.g. games since some IMEs may delay the input
@@ -206,6 +211,15 @@ impl EventProcessor {
             },
             xlib::ButtonPress | xlib::ButtonRelease => {
                 let event: &xlib::XButtonEvent = xev.as_ref();
+                let device_id = button_origin
+                    .filter(|origin| {
+                        origin.window == event.window
+                            && origin.time == event.time
+                            && origin.serial == event.serial
+                            && origin.button == event.button
+                            && origin.event_type == event_type
+                    })
+                    .map_or_else(|| mkdid(0), |origin| mkdid(origin.device_id));
                 let window_id = mkwid(event.window as xproto::Window);
                 Self::window_target(&self.target).xconn.set_timestamp(event.time as _);
                 if let Some(active) = self.active_window {
@@ -219,7 +233,7 @@ impl EventProcessor {
                 // Steam observes these wheel edges, but XI2 determines whether
                 // they are legacy detents or emulated smooth-scroll events.
                 if !(4..=7).contains(&event.button) {
-                    self.pointer_button_input(window_id, mkdid(0), event.button, state, &mut callback);
+                    self.pointer_button_input(window_id, device_id, event.button, state, &mut callback);
                 }
             },
             xlib::GenericEvent => {
@@ -244,7 +258,7 @@ impl EventProcessor {
                         // XI2 selection suppresses the server's core events
                         // for this client. Requeue the equivalent Xlib event
                         // so Steam can consume it before ordinary game clicks.
-                        super::steam_overlay_compat::expose_pointer_event(
+                        self.queued_button_origin = super::steam_overlay_compat::expose_pointer_event(
                             &Self::window_target(&self.target).xconn,
                             xev,
                         );
@@ -270,7 +284,7 @@ impl EventProcessor {
                             &mut callback,
                         );
                         self.xinput2_mouse_motion(xev, &mut callback);
-                        super::steam_overlay_compat::expose_pointer_event(
+                        let _ = super::steam_overlay_compat::expose_pointer_event(
                             &Self::window_target(&self.target).xconn,
                             xev,
                         );
@@ -384,6 +398,10 @@ impl EventProcessor {
                 std::ptr::null_mut(),
             )
         };
+        if result == 0 {
+            // Steam may consume the queued button without returning an event.
+            self.queued_button_origin = None;
+        }
 
         result != 0
     }
