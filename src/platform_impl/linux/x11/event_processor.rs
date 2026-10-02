@@ -233,8 +233,9 @@ impl EventProcessor {
                 } else {
                     ElementState::Released
                 };
-                // A wheel detent belongs to the press, not both button edges.
-                if state == ElementState::Pressed || !(4..=7).contains(&event.button) {
+                // Steam observes these wheel edges, but XI2 determines whether
+                // they are legacy detents or emulated smooth-scroll events.
+                if !(4..=7).contains(&event.button) {
                     self.pointer_button_input(window_id, mkdid(0), event.button, state, &mut callback);
                 }
             },
@@ -257,13 +258,18 @@ impl EventProcessor {
                         };
 
                         let xev: &XIDeviceEvent = unsafe { xev.as_event() };
-                        self.update_mods_from_xinput2_event(
-                            &xev.mods,
-                            &xev.group,
-                            false,
-                            &mut callback,
-                        );
-                        self.xinput2_button_input(xev, state, &mut callback);
+                        // Core owns ordinary clicks. XI2's emulation flag
+                        // prevents a native smooth scroll being counted again
+                        // as a wheel button; release never adds a detent.
+                        if state == ElementState::Pressed && (4..=7).contains(&xev.detail) {
+                            self.update_mods_from_xinput2_event(
+                                &xev.mods,
+                                &xev.group,
+                                false,
+                                &mut callback,
+                            );
+                            self.xinput2_button_input(xev, state, &mut callback);
+                        }
                     },
                     xinput2::XI_Motion => {
                         let xev: &XIDeviceEvent = unsafe { xev.as_event() };

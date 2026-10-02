@@ -478,9 +478,13 @@ impl UnownedWindow {
             );
             leap!(result).ignore_error();
 
-            // Core events carry pointer motion/buttons through Steam's Xlib
-            // hooks. Keep XI2 focus, enter/leave, touch and raw devices intact.
-            let mask = xinput::XIEventMask::ENTER
+            // Core events keep Steam's pointer hooks observable. XI2 motion
+            // retains smooth-scroll valuators, and XI2 buttons distinguish
+            // legacy wheel presses from emulated smooth-scroll detents.
+            let mask = xinput::XIEventMask::MOTION
+                | xinput::XIEventMask::BUTTON_PRESS
+                | xinput::XIEventMask::BUTTON_RELEASE
+                | xinput::XIEventMask::ENTER
                 | xinput::XIEventMask::LEAVE
                 | xinput::XIEventMask::FOCUS_IN
                 | xinput::XIEventMask::FOCUS_OUT
