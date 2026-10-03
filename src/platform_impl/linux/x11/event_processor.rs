@@ -149,9 +149,14 @@ impl EventProcessor {
         F: FnMut(&RootAEL, Event<T>),
     {
         let event_type = xev.get_type();
-        // Slave metadata precedes a server-core edge. Only the next exact
-        // dispatch can adopt it; an intercepted or intervening event expires it.
-        let button_origin = self.queued_button_origin.take();
+        // The core implicit grab can insert an XKB notification between slave
+        // metadata and its core edge. It is not a new pointer input; retain the
+        // exact fingerprint across that notification, but expire it otherwise.
+        let button_origin = if event_type == self.xkbext.first_event as _ {
+            None
+        } else {
+            self.queued_button_origin.take()
+        };
 
         // If we have IME disabled, don't try to `filter_event`, since only IME can consume them
         // and forward back. This is not desired for e.g. games since some IMEs may delay the input
