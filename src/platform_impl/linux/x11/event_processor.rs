@@ -218,7 +218,6 @@ impl EventProcessor {
                 let origin = button_origin.filter(|origin| {
                     origin.time == event.time
                         && origin.serial == event.serial
-                        && origin.button == event.button
                         && origin.event_type == event_type
                 });
                 if origin.is_some_and(|origin| origin.emulated) {

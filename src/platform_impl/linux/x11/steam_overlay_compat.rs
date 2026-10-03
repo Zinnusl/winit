@@ -89,7 +89,6 @@ pub(super) fn create_window(
 pub(super) struct ButtonOrigin {
     pub(super) time: ffi::Time,
     pub(super) serial: std::os::raw::c_ulong,
-    pub(super) button: u32,
     pub(super) event_type: i32,
     pub(super) device_id: xinput::DeviceId,
     pub(super) emulated: bool,
@@ -98,11 +97,12 @@ pub(super) struct ButtonOrigin {
 /// XI2 raw edges precede core edges and carry both the master identity and
 /// emulation flag. Steam ignores their raw event types. Selecting window XI2
 /// slave buttons instead would make Steam see that click twice.
+/// Raw details are physical numbers; core details are mapped logical numbers.
+/// Queue adjacency, timestamp, serial and edge type identify the counterpart.
 pub(super) fn button_origin(input: &ffi::XIRawEvent) -> ButtonOrigin {
     ButtonOrigin {
         time: input.time,
         serial: input.serial,
-        button: input.detail as _,
         event_type: if input.evtype == ffi::XI_RawButtonPress {
             ffi::ButtonPress
         } else {
