@@ -216,7 +216,8 @@ impl EventProcessor {
             xlib::ButtonPress | xlib::ButtonRelease => {
                 let event: &xlib::XButtonEvent = xev.as_ref();
                 let origin = button_origin.filter(|origin| {
-                    origin.time == event.time
+                    event.send_event == 0
+                        && origin.time == event.time
                         && origin.serial == event.serial
                         && origin.event_type == event_type
                 });
