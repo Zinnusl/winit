@@ -333,6 +333,7 @@ impl<T: 'static> EventLoop<T> {
             modifiers: Default::default(),
             is_composing: false,
             queued_button_origin: None,
+            core_pointer_device: mkdid(util::VIRTUAL_CORE_POINTER),
         };
 
         // Register for device hotplug events

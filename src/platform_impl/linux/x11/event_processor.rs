@@ -73,6 +73,9 @@ pub struct EventProcessor {
     pub xmodmap: util::ModifierKeymap,
     pub is_composing: bool,
     pub(super) queued_button_origin: Option<super::steam_overlay_compat::ButtonOrigin>,
+    // Core implicit-grab motion has no device ID of its own. Preserve the
+    // native button's master identity until a new native press replaces it.
+    pub(super) core_pointer_device: crate::event::DeviceId,
 }
 
 impl EventProcessor {
@@ -225,6 +228,9 @@ impl EventProcessor {
                     return;
                 }
                 let device_id = mkdid(origin.map_or(util::VIRTUAL_CORE_POINTER, |origin| origin.device_id));
+                if event.send_event == 0 && event_type == xlib::ButtonPress {
+                    self.core_pointer_device = device_id;
+                }
                 let window_id = mkwid(event.window as xproto::Window);
                 Self::window_target(&self.target).xconn.set_timestamp(event.time as _);
                 if let Some(active) = self.active_window {
@@ -238,6 +244,19 @@ impl EventProcessor {
                 if state == ElementState::Pressed || !(4..=7).contains(&event.button) {
                     self.pointer_button_input(window_id, device_id, event.button, state, &mut callback);
                 }
+            },
+            xlib::MotionNotify => {
+                let event: &xlib::XMotionEvent = xev.as_ref();
+                Self::window_target(&self.target).xconn.set_timestamp(event.time as _);
+                if let Some(active) = self.active_window {
+                    self.update_mods_from_core_event(mkwid(active), event.state as _, &mut callback);
+                }
+                self.pointer_motion(
+                    event.window as xproto::Window,
+                    self.core_pointer_device,
+                    (f64::from(event.x), f64::from(event.y)),
+                    &mut callback,
+                );
             },
             xlib::GenericEvent => {
                 let wt = Self::window_target(&self.target);
