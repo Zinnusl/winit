@@ -139,6 +139,7 @@ pub struct ActiveEventLoop {
     redraw_sender: WakeSender<WindowId>,
     activation_sender: WakeSender<ActivationToken>,
     device_events: Cell<DeviceEvents>,
+    device_events_enabled: Cell<bool>,
 }
 
 pub struct EventLoop<T: 'static> {
@@ -304,6 +305,7 @@ impl<T: 'static> EventLoop<T> {
                 waker: waker.clone(),
             },
             device_events: Default::default(),
+            device_events_enabled: Cell::new(true),
         };
 
         // Set initial device event filter.
@@ -659,12 +661,14 @@ impl ActiveEventLoop {
     pub fn update_listen_device_events(&self, focus: bool) {
         let device_events = self.device_events.get() == DeviceEvents::Always
             || (focus && self.device_events.get() == DeviceEvents::WhenFocused);
+        self.device_events_enabled.set(device_events);
 
-        let mut mask = xinput::XIEventMask::from(0u32);
+        // Raw button metadata identifies native core clicks and suppresses
+        // emulated detents even when public DeviceEvents are disabled.
+        let mut mask =
+            xinput::XIEventMask::RAW_BUTTON_PRESS | xinput::XIEventMask::RAW_BUTTON_RELEASE;
         if device_events {
-            mask = xinput::XIEventMask::RAW_MOTION
-                | xinput::XIEventMask::RAW_BUTTON_PRESS
-                | xinput::XIEventMask::RAW_BUTTON_RELEASE
+            mask |= xinput::XIEventMask::RAW_MOTION
                 | xinput::XIEventMask::RAW_KEY_PRESS
                 | xinput::XIEventMask::RAW_KEY_RELEASE;
         }

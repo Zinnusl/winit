@@ -149,9 +149,9 @@ impl EventProcessor {
         F: FnMut(&RootAEL, Event<T>),
     {
         let event_type = xev.get_type();
-        // The core implicit grab can insert an XKB notification between slave
-        // metadata and its core edge. It is not a new pointer input; retain the
-        // exact fingerprint across that notification, but expire it otherwise.
+        // A core implicit grab can insert an XKB notification between raw
+        // metadata and its core edge. Keep the exact fingerprint across that
+        // notification; expire it on any other native dispatch.
         let button_origin = if event_type == self.xkbext.first_event as _ {
             None
         } else {
@@ -216,8 +216,7 @@ impl EventProcessor {
             xlib::ButtonPress | xlib::ButtonRelease => {
                 let event: &xlib::XButtonEvent = xev.as_ref();
                 let origin = button_origin.filter(|origin| {
-                    origin.window == event.window
-                        && origin.time == event.time
+                    origin.time == event.time
                         && origin.serial == event.serial
                         && origin.button == event.button
                         && origin.event_type == event_type
@@ -251,34 +250,6 @@ impl EventProcessor {
                 let evtype = xev.evtype();
 
                 match evtype {
-                    ty @ xinput2::XI_ButtonPress | ty @ xinput2::XI_ButtonRelease => {
-                        let state = if ty == xinput2::XI_ButtonPress {
-                            ElementState::Pressed
-                        } else {
-                            ElementState::Released
-                        };
-
-                        let xev: &XIDeviceEvent = unsafe { xev.as_event() };
-                        let core_source = self.devices.borrow()
-                            .get(&DeviceId(xev.deviceid as _))
-                            .is_some_and(|device| device.attachment == util::VIRTUAL_CORE_POINTER.into());
-                        if core_source {
-                            // This slave edge does not suppress the master's
-                            // native core click. Keep its emulation flag only.
-                            self.queued_button_origin = super::steam_overlay_compat::expose_pointer_event(
-                                &Self::window_target(&self.target).xconn,
-                                xev,
-                            );
-                        } else if state == ElementState::Pressed || !(4..=7).contains(&xev.detail) {
-                            self.update_mods_from_xinput2_event(
-                                &xev.mods,
-                                &xev.group,
-                                false,
-                                &mut callback,
-                            );
-                            self.xinput2_button_input(xev, state, &mut callback);
-                        }
-                    },
                     xinput2::XI_Motion => {
                         let xev: &XIDeviceEvent = unsafe { xev.as_event() };
                         self.update_mods_from_xinput2_event(
@@ -288,10 +259,6 @@ impl EventProcessor {
                             &mut callback,
                         );
                         self.xinput2_mouse_motion(xev, &mut callback);
-                        let _ = super::steam_overlay_compat::expose_pointer_event(
-                            &Self::window_target(&self.target).xconn,
-                            xev,
-                        );
                     },
                     xinput2::XI_Enter => {
                         let xev: &XIEnterEvent = unsafe { xev.as_event() };
@@ -334,7 +301,11 @@ impl EventProcessor {
                         };
 
                         let xev: &XIRawEvent = unsafe { xev.as_event() };
-                        self.xinput2_raw_button_input(xev, state, &mut callback);
+                        self.queued_button_origin =
+                            Some(super::steam_overlay_compat::button_origin(xev));
+                        if Self::window_target(&self.target).device_events_enabled.get() {
+                            self.xinput2_raw_button_input(xev, state, &mut callback);
+                        }
                     },
                     xinput2::XI_RawMotion => {
                         let xev: &XIRawEvent = unsafe { xev.as_event() };
@@ -1100,28 +1071,6 @@ impl EventProcessor {
         callback(&self.target, event);
     }
 
-    fn xinput2_button_input<T: 'static, F>(
-        &self,
-        event: &XIDeviceEvent,
-        state: ElementState,
-        callback: F,
-    ) where
-        F: FnMut(&RootAEL, Event<T>),
-    {
-        let wt = Self::window_target(&self.target);
-        let window_id = mkwid(event.event as xproto::Window);
-        let device_id = mkdid(event.deviceid as xinput::DeviceId);
-
-        // Set the timestamp.
-        wt.xconn.set_timestamp(event.time as xproto::Timestamp);
-
-        // Deliver multi-touch events instead of emulated mouse events.
-        if (event.flags & xinput2::XIPointerEmulated) != 0 {
-            return;
-        }
-
-        self.pointer_button_input(window_id, device_id, event.detail as u32, state, callback);
-    }
 
     fn pointer_button_input<T: 'static, F>(
         &self,

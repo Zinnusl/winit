@@ -10,7 +10,7 @@ use x11rb::{
     protocol::{xinput, xproto},
 };
 
-use super::{ffi, util::{memory::XSmartPointer, VIRTUAL_CORE_POINTER}, DeviceInfo, X11Error, XConnection, ALL_DEVICES};
+use super::{ffi, util::memory::XSmartPointer, X11Error, XConnection};
 
 /// Preserve the selected visual, colormap, event mask and parent while making
 /// creation observable at the public Xlib boundary intercepted by Steam.
@@ -82,35 +82,11 @@ pub(super) fn create_window(
     Ok(window as xproto::Window)
 }
 
-/// Receive source-device button metadata without selecting XI2 buttons on the
-/// virtual core master. That leaves real server-core clicks visible to Steam.
-/// Other masters and floating pointers retain their direct XI2 delivery.
-pub(super) fn select_native_button_sources(
-    xconn: &XConnection,
-    window: xproto::Window,
-) -> Result<(), X11Error> {
-    let devices = DeviceInfo::get(xconn, ALL_DEVICES.into())
-        .ok_or(X11Error::UnexpectedNull("XIQueryDevice"))?;
-    devices.iter().filter(|device| {
-        (device._use == ffi::XISlavePointer && device.attachment == VIRTUAL_CORE_POINTER.into())
-            || device._use == ffi::XIFloatingSlave
-            || (device._use == ffi::XIMasterPointer && device.deviceid != VIRTUAL_CORE_POINTER.into())
-    }).try_for_each(|device| {
-        xconn.select_xinput_events(
-            window,
-            device.deviceid as _,
-            xinput::XIEventMask::BUTTON_PRESS | xinput::XIEventMask::BUTTON_RELEASE,
-        )?.check()?;
-        Ok(())
-    })
-}
-
-/// Origin metadata for only the next event returned from the Xlib queue.
-/// No cookie pointer survives publication. A consumed event's metadata expires
-/// on an empty queue or the next native dispatch, so it cannot label later input.
+/// Scalar metadata for the next matching server-core button edge.
+/// XKB grab notifications can intervene; other dispatch and empty polling
+/// expire it. No Xlib cookie pointer survives its owning dispatch.
 #[derive(Clone, Copy)]
 pub(super) struct ButtonOrigin {
-    pub(super) window: ffi::Window,
     pub(super) time: ffi::Time,
     pub(super) serial: std::os::raw::c_ulong,
     pub(super) button: u32,
@@ -119,57 +95,20 @@ pub(super) struct ButtonOrigin {
     pub(super) emulated: bool,
 }
 
-/// Source-device buttons precede real core edges in the server queue. Copy only
-/// their scalar metadata; requeueing a click marks it as replayed inside Steam.
-/// Precise XI2 motion remains authoritative for game movement and scrolling.
-pub(super) fn expose_pointer_event(
-    xconn: &XConnection,
-    input: &ffi::XIDeviceEvent,
-) -> Option<ButtonOrigin> {
-    if input.evtype == ffi::XI_ButtonPress || input.evtype == ffi::XI_ButtonRelease {
-        return Some(ButtonOrigin {
-            window: input.event,
-            time: input.time,
-            serial: input.serial,
-            button: input.detail as _,
-            event_type: if input.evtype == ffi::XI_ButtonPress {
-                ffi::ButtonPress
-            } else {
-                ffi::ButtonRelease
-            },
-            device_id: VIRTUAL_CORE_POINTER,
-            emulated: input.flags & ffi::XIPointerEmulated != 0,
-        });
-    }
-    let state = (input.mods.effective as u32 & 0xff)
-        | ((input.group.effective as u32 & 3) << 13)
-        | (1..=5).fold(0, |state, button| {
-            let byte = button / 8;
-            let pressed = byte < input.buttons.mask_len
-                // SAFETY: the live XI2 cookie owns mask_len bytes.
-                && unsafe { *input.buttons.mask.add(byte as usize) } & (1 << (button % 8)) != 0;
-            state | if pressed { 1 << (7 + button) } else { 0 }
-        });
-    // SAFETY: XEvent is POD; XPutBackEvent copies this initialized motion.
-    let mut event: ffi::XEvent = unsafe { std::mem::zeroed() };
-    event.motion = ffi::XMotionEvent {
-        type_: ffi::MotionNotify,
-        serial: input.serial,
-        send_event: input.send_event,
-        display: xconn.display,
-        window: input.event,
-        root: input.root,
-        subwindow: input.child,
+/// XI2 raw edges precede core edges and carry both the master identity and
+/// emulation flag. Steam ignores their raw event types. Selecting window XI2
+/// slave buttons instead would make Steam see that click twice.
+pub(super) fn button_origin(input: &ffi::XIRawEvent) -> ButtonOrigin {
+    ButtonOrigin {
         time: input.time,
-        x: input.event_x as _,
-        y: input.event_y as _,
-        x_root: input.root_x as _,
-        y_root: input.root_y as _,
-        state,
-        is_hint: 0,
-        same_screen: 1,
-    };
-    // SAFETY: this connection and event are owned by the event thread.
-    unsafe { (xconn.xlib.XPutBackEvent)(xconn.display, &mut event) };
-    None
+        serial: input.serial,
+        button: input.detail as _,
+        event_type: if input.evtype == ffi::XI_RawButtonPress {
+            ffi::ButtonPress
+        } else {
+            ffi::ButtonRelease
+        },
+        device_id: input.deviceid as _,
+        emulated: input.flags & ffi::XIPointerEmulated != 0,
+    }
 }

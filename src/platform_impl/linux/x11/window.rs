@@ -491,7 +491,6 @@ impl UnownedWindow {
                 | xinput::XIEventMask::TOUCH_END;
             leap!(xconn.select_xinput_events(window.xwindow, super::ALL_MASTER_DEVICES, mask))
                 .ignore_error();
-            leap!(super::steam_overlay_compat::select_native_button_sources(&xconn, window.xwindow));
 
             // Set visibility (map window)
             if window_attrs.visible {
