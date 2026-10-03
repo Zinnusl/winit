@@ -478,12 +478,10 @@ impl UnownedWindow {
             );
             leap!(result).ignore_error();
 
-            // Core events keep Steam's pointer hooks observable. XI2 motion
-            // retains smooth-scroll valuators, and XI2 buttons distinguish
-            // legacy wheel presses from emulated smooth-scroll detents.
+            // Keep precise motion/scrolling while the virtual core master sends
+            // native button edges to Steam. Slave XI2 edges supply emulation
+            // metadata without suppressing the core events.
             let mask = xinput::XIEventMask::MOTION
-                | xinput::XIEventMask::BUTTON_PRESS
-                | xinput::XIEventMask::BUTTON_RELEASE
                 | xinput::XIEventMask::ENTER
                 | xinput::XIEventMask::LEAVE
                 | xinput::XIEventMask::FOCUS_IN
@@ -493,6 +491,7 @@ impl UnownedWindow {
                 | xinput::XIEventMask::TOUCH_END;
             leap!(xconn.select_xinput_events(window.xwindow, super::ALL_MASTER_DEVICES, mask))
                 .ignore_error();
+            leap!(super::steam_overlay_compat::select_native_button_sources(&xconn, window.xwindow));
 
             // Set visibility (map window)
             if window_attrs.visible {

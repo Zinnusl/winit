@@ -149,9 +149,8 @@ impl EventProcessor {
         F: FnMut(&RootAEL, Event<T>),
     {
         let event_type = xev.get_type();
-        // XPutBackEvent puts the translated button at the head of the queue.
-        // Only this next dispatch can adopt its native origin; any other event
-        // consumes the metadata instead of allowing it to go stale.
+        // Slave metadata precedes a server-core edge. Only the next exact
+        // dispatch can adopt it; an intercepted or intervening event expires it.
         let button_origin = self.queued_button_origin.take();
 
         // If we have IME disabled, don't try to `filter_event`, since only IME can consume them
@@ -211,15 +210,17 @@ impl EventProcessor {
             },
             xlib::ButtonPress | xlib::ButtonRelease => {
                 let event: &xlib::XButtonEvent = xev.as_ref();
-                let device_id = button_origin
-                    .filter(|origin| {
-                        origin.window == event.window
-                            && origin.time == event.time
-                            && origin.serial == event.serial
-                            && origin.button == event.button
-                            && origin.event_type == event_type
-                    })
-                    .map_or_else(|| mkdid(0), |origin| mkdid(origin.device_id));
+                let origin = button_origin.filter(|origin| {
+                    origin.window == event.window
+                        && origin.time == event.time
+                        && origin.serial == event.serial
+                        && origin.button == event.button
+                        && origin.event_type == event_type
+                });
+                if origin.is_some_and(|origin| origin.emulated) {
+                    return;
+                }
+                let device_id = mkdid(origin.map_or(util::VIRTUAL_CORE_POINTER, |origin| origin.device_id));
                 let window_id = mkwid(event.window as xproto::Window);
                 Self::window_target(&self.target).xconn.set_timestamp(event.time as _);
                 if let Some(active) = self.active_window {
@@ -230,9 +231,7 @@ impl EventProcessor {
                 } else {
                     ElementState::Released
                 };
-                // Steam observes these wheel edges, but XI2 determines whether
-                // they are legacy detents or emulated smooth-scroll events.
-                if !(4..=7).contains(&event.button) {
+                if state == ElementState::Pressed || !(4..=7).contains(&event.button) {
                     self.pointer_button_input(window_id, device_id, event.button, state, &mut callback);
                 }
             },
@@ -255,17 +254,17 @@ impl EventProcessor {
                         };
 
                         let xev: &XIDeviceEvent = unsafe { xev.as_event() };
-                        // XI2 selection suppresses the server's core events
-                        // for this client. Requeue the equivalent Xlib event
-                        // so Steam can consume it before ordinary game clicks.
-                        self.queued_button_origin = super::steam_overlay_compat::expose_pointer_event(
-                            &Self::window_target(&self.target).xconn,
-                            xev,
-                        );
-                        // Core owns ordinary clicks. XI2's emulation flag
-                        // prevents a native smooth scroll being counted again
-                        // as a wheel button; release never adds a detent.
-                        if state == ElementState::Pressed && (4..=7).contains(&xev.detail) {
+                        let core_source = self.devices.borrow()
+                            .get(&DeviceId(xev.deviceid as _))
+                            .is_some_and(|device| device.attachment == util::VIRTUAL_CORE_POINTER.into());
+                        if core_source {
+                            // This slave edge does not suppress the master's
+                            // native core click. Keep its emulation flag only.
+                            self.queued_button_origin = super::steam_overlay_compat::expose_pointer_event(
+                                &Self::window_target(&self.target).xconn,
+                                xev,
+                            );
+                        } else if state == ElementState::Pressed || !(4..=7).contains(&xev.detail) {
                             self.update_mods_from_xinput2_event(
                                 &xev.mods,
                                 &xev.group,

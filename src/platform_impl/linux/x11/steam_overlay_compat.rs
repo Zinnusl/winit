@@ -10,7 +10,7 @@ use x11rb::{
     protocol::{xinput, xproto},
 };
 
-use super::{ffi, util::memory::XSmartPointer, X11Error, XConnection};
+use super::{ffi, util::{memory::XSmartPointer, VIRTUAL_CORE_POINTER}, DeviceInfo, X11Error, XConnection, ALL_DEVICES};
 
 /// Preserve the selected visual, colormap, event mask and parent while making
 /// creation observable at the public Xlib boundary intercepted by Steam.
@@ -82,6 +82,29 @@ pub(super) fn create_window(
     Ok(window as xproto::Window)
 }
 
+/// Receive source-device button metadata without selecting XI2 buttons on the
+/// virtual core master. That leaves real server-core clicks visible to Steam.
+/// Other masters and floating pointers retain their direct XI2 delivery.
+pub(super) fn select_native_button_sources(
+    xconn: &XConnection,
+    window: xproto::Window,
+) -> Result<(), X11Error> {
+    let devices = DeviceInfo::get(xconn, ALL_DEVICES.into())
+        .ok_or(X11Error::UnexpectedNull("XIQueryDevice"))?;
+    devices.iter().filter(|device| {
+        (device._use == ffi::XISlavePointer && device.attachment == VIRTUAL_CORE_POINTER.into())
+            || device._use == ffi::XIFloatingSlave
+            || (device._use == ffi::XIMasterPointer && device.deviceid != VIRTUAL_CORE_POINTER.into())
+    }).try_for_each(|device| {
+        xconn.select_xinput_events(
+            window,
+            device.deviceid as _,
+            xinput::XIEventMask::BUTTON_PRESS | xinput::XIEventMask::BUTTON_RELEASE,
+        )?.check()?;
+        Ok(())
+    })
+}
+
 /// Origin metadata for only the next event returned from the Xlib queue.
 /// No cookie pointer survives publication. A consumed event's metadata expires
 /// on an empty queue or the next native dispatch, so it cannot label later input.
@@ -93,21 +116,30 @@ pub(super) struct ButtonOrigin {
     pub(super) button: u32,
     pub(super) event_type: i32,
     pub(super) device_id: xinput::DeviceId,
+    pub(super) emulated: bool,
 }
 
-/// XI2 selection suppresses native core pointer delivery to this client.
-/// Requeue an equivalent core event through the same Xlib queue Steam reads.
-/// The original XI2 motion retains precise positions and scroll valuators;
-/// queued motion is overlay-only, while queued ordinary clicks reach winit
-/// only if Steam leaves them in the queue.
+/// Source-device buttons precede real core edges in the server queue. Copy only
+/// their scalar metadata; requeueing a click marks it as replayed inside Steam.
+/// Precise XI2 motion remains authoritative for game movement and scrolling.
 pub(super) fn expose_pointer_event(
     xconn: &XConnection,
     input: &ffi::XIDeviceEvent,
 ) -> Option<ButtonOrigin> {
-    let button = input.evtype == ffi::XI_ButtonPress || input.evtype == ffi::XI_ButtonRelease;
-    if button && !(4..=7).contains(&input.detail) && input.flags & ffi::XIPointerEmulated != 0 {
-        // Preserve upstream's touch-versus-emulated-mouse distinction.
-        return None;
+    if input.evtype == ffi::XI_ButtonPress || input.evtype == ffi::XI_ButtonRelease {
+        return Some(ButtonOrigin {
+            window: input.event,
+            time: input.time,
+            serial: input.serial,
+            button: input.detail as _,
+            event_type: if input.evtype == ffi::XI_ButtonPress {
+                ffi::ButtonPress
+            } else {
+                ffi::ButtonRelease
+            },
+            device_id: VIRTUAL_CORE_POINTER,
+            emulated: input.flags & ffi::XIPointerEmulated != 0,
+        });
     }
     let state = (input.mods.effective as u32 & 0xff)
         | ((input.group.effective as u32 & 3) << 13)
@@ -118,62 +150,26 @@ pub(super) fn expose_pointer_event(
                 && unsafe { *input.buttons.mask.add(byte as usize) } & (1 << (button % 8)) != 0;
             state | if pressed { 1 << (7 + button) } else { 0 }
         });
-    // SAFETY: XEvent is POD. Its selected pointer member is fully initialized
-    // before XPutBackEvent copies it into this display's owned event queue.
+    // SAFETY: XEvent is POD; XPutBackEvent copies this initialized motion.
     let mut event: ffi::XEvent = unsafe { std::mem::zeroed() };
-    if button {
-        event.button = ffi::XButtonEvent {
-            type_: if input.evtype == ffi::XI_ButtonPress {
-                ffi::ButtonPress
-            } else {
-                ffi::ButtonRelease
-            },
-            serial: input.serial,
-            send_event: input.send_event,
-            display: xconn.display,
-            window: input.event,
-            root: input.root,
-            subwindow: input.child,
-            time: input.time,
-            x: input.event_x as _,
-            y: input.event_y as _,
-            x_root: input.root_x as _,
-            y_root: input.root_y as _,
-            state,
-            button: input.detail as _,
-            same_screen: 1,
-        };
-    } else {
-        event.motion = ffi::XMotionEvent {
-            type_: ffi::MotionNotify,
-            serial: input.serial,
-            send_event: input.send_event,
-            display: xconn.display,
-            window: input.event,
-            root: input.root,
-            subwindow: input.child,
-            time: input.time,
-            x: input.event_x as _,
-            y: input.event_y as _,
-            x_root: input.root_x as _,
-            y_root: input.root_y as _,
-            state,
-            is_hint: 0,
-            same_screen: 1,
-        };
-    }
-    // SAFETY: this connection and event are live and owned by the event thread.
-    unsafe { (xconn.xlib.XPutBackEvent)(xconn.display, &mut event) };
-    button.then(|| ButtonOrigin {
-        window: input.event,
-        time: input.time,
+    event.motion = ffi::XMotionEvent {
+        type_: ffi::MotionNotify,
         serial: input.serial,
-        button: input.detail as _,
-        event_type: if input.evtype == ffi::XI_ButtonPress {
-            ffi::ButtonPress
-        } else {
-            ffi::ButtonRelease
-        },
-        device_id: input.deviceid as _,
-    })
+        send_event: input.send_event,
+        display: xconn.display,
+        window: input.event,
+        root: input.root,
+        subwindow: input.child,
+        time: input.time,
+        x: input.event_x as _,
+        y: input.event_y as _,
+        x_root: input.root_x as _,
+        y_root: input.root_y as _,
+        state,
+        is_hint: 0,
+        same_screen: 1,
+    };
+    // SAFETY: this connection and event are owned by the event thread.
+    unsafe { (xconn.xlib.XPutBackEvent)(xconn.display, &mut event) };
+    None
 }
